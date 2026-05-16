@@ -47,9 +47,10 @@ export async function POST(request: NextRequest) {
       }
 
       // 写入最终文件
-      await store.set(key, merged.buffer, {
-        cacheControl: "private, max-age=3600",
-      });
+      // 替换原来的 merged.buffer
+await store.set(key, merged.buffer.slice(0, totalLen), {
+  cacheControl: "private, max-age=3600",
+});
 
       // 写入 sidecar meta
       await store.setJSON(`__meta__/${key}`, {
