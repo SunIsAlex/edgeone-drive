@@ -8,12 +8,12 @@ export async function POST(request: NextRequest) {
     const store = getDriveStore();
     const formData = await request.formData();
 
-    const chunk     = formData.get("chunk") as File | null;   // 当前分片 Blob
-    const key       = formData.get("key") as string;          // 最终文件路径
-    const indexStr  = formData.get("index") as string;        // 分片序号 0,1,2…
-    const totalStr  = formData.get("total") as string;        // 总分片数
-    const fileType  = formData.get("fileType") as string;     // 原始 MIME
-    const fileSize  = formData.get("fileSize") as string;     // 原始文件大小（字节）
+    const chunk    = formData.get("chunk")    as File   | null;
+    const key      = formData.get("key")      as string;
+    const indexStr = formData.get("index")    as string;
+    const totalStr = formData.get("total")    as string;
+    const fileType = formData.get("fileType") as string;
+    const fileSize = formData.get("fileSize") as string;
 
     if (!chunk || !key || indexStr == null || !totalStr) {
       return NextResponse.json({ error: "Missing fields" }, { status: 400 });
@@ -21,50 +21,21 @@ export async function POST(request: NextRequest) {
 
     const index = parseInt(indexStr);
     const total = parseInt(totalStr);
+
+    // 写入分片
     const chunkBuffer = await chunk.arrayBuffer();
+    await store.set(`__chunks__/${key}/${index}`, chunkBuffer);
 
-    // 分片 key：__chunks__/<key>/<index>
-    const chunkKey = `__chunks__/${key}/${index}`;
-    await store.set(chunkKey, chunkBuffer);
-
-    // 最后一片上传完毕 → 合并所有分片
+    // 最后一片：写 manifest，不合并
     if (index === total - 1) {
-      // 读取所有分片并拼接
-      const parts: Uint8Array[] = [];
-      for (let i = 0; i < total; i++) {
-        const buf = await store.get(`__chunks__/${key}/${i}`, { type: "arrayBuffer" }) as ArrayBuffer;
-        if (!buf) throw new Error(`Missing chunk ${i}`);
-        parts.push(new Uint8Array(buf));
-      }
-
-      // 合并
-      const totalLen = parts.reduce((s, p) => s + p.byteLength, 0);
-      const merged = new Uint8Array(totalLen);
-      let offset = 0;
-      for (const p of parts) {
-        merged.set(p, offset);
-        offset += p.byteLength;
-      }
-
-      // 写入最终文件
-      // 替换原来的 merged.buffer
-await store.set(key, merged.buffer.slice(0, totalLen), {
-  cacheControl: "private, max-age=3600",
-});
-
-      // 写入 sidecar meta
       await store.setJSON(`__meta__/${key}`, {
         contentType: fileType || "application/octet-stream",
-        size: parseInt(fileSize) || totalLen,
+        size: parseInt(fileSize) || 0,
         lastModified: new Date().toISOString(),
         fileName: key.split("/").pop(),
+        chunks: total,           // ← 记录分片数，下载时用
+        chunked: true,           // ← 标记为分片文件
       });
-
-      // 清理分片
-      for (let i = 0; i < total; i++) {
-        await store.delete(`__chunks__/${key}/${i}`);
-      }
-
       return NextResponse.json({ success: true, done: true, key });
     }
 
