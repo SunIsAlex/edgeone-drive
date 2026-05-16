@@ -49,21 +49,21 @@ function getFileTypeLabel(contentType: string): string {
 }
 
 export default function DrivePage() {
-  const [files, setFiles]                   = useState<FileItem[]>([]);
-  const [directories, setDirectories]       = useState<string[]>([]);
-  const [loading, setLoading]               = useState(true);
-  const [uploading, setUploading]           = useState(false);
+  const [files, setFiles] = useState<FileItem[]>([]);
+  const [directories, setDirectories] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadFileName, setUploadFileName] = useState("");
-  const [error, setError]                   = useState<string | null>(null);
-  const [successMsg, setSuccessMsg]         = useState<string | null>(null);
-  const [dragging, setDragging]             = useState(false);
-  const [deleting, setDeleting]             = useState<string | null>(null);
-  const [currentPath, setCurrentPath]       = useState("");
-  const [search, setSearch]                 = useState("");
-  const [showMkdir, setShowMkdir]           = useState(false);
-  const [newFolderName, setNewFolderName]   = useState("");
-  const fileInputRef  = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [currentPath, setCurrentPath] = useState("");
+  const [search, setSearch] = useState("");
+  const [showMkdir, setShowMkdir] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const mkdirInputRef = useRef<HTMLInputElement>(null);
 
   const notify = (msg: string, isError = false) => {
@@ -116,35 +116,54 @@ export default function DrivePage() {
     return crumbs;
   };
 
+  const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB，留余量低于平台限制
+
   const uploadFile = async (file: File) => {
-    const MAX = 100 * 1024 * 1024;
-    if (file.size > MAX) {
-      notify(`文件 "${file.name}" 超过 100 MB 限制`, true);
-      return;
-    }
     setUploading(true);
     setUploadProgress(0);
     setUploadFileName(file.name);
-    const form = new FormData();
-    form.append("file", file);
-    form.append("path", currentPath.replace(/\/$/, ""));
-    const timer = setInterval(() => {
-      setUploadProgress((p) => Math.min(p + 6, 88));
-    }, 150);
+
+    const key = currentPath.replace(/\/$/, "")
+      ? `${currentPath.replace(/\/$/, "")}/${file.name}`
+      : file.name;
+
+    const total = Math.ceil(file.size / CHUNK_SIZE);
+
     try {
-      const res = await fetch("/api/files", { method: "POST", body: form });
-      const data = await res.json();
-      clearInterval(timer);
-      if (!res.ok) throw new Error(data.error);
+      for (let i = 0; i < total; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const blob = file.slice(start, end);
+
+        const form = new FormData();
+        form.append("chunk", blob);
+        form.append("key", key);
+        form.append("index", String(i));
+        form.append("total", String(total));
+        form.append("fileType", file.type || "application/octet-stream");
+        form.append("fileSize", String(file.size));
+
+        const res = await fetch("/api/upload-chunk", { method: "POST", body: form });
+
+        // 服务端返回 HTML 说明触发了平台错误页，给出明确提示
+        const text = await res.text();
+        if (text.trimStart().startsWith("<")) {
+          throw new Error(`分片 ${i + 1}/${total} 上传失败：服务器返回了错误页面（可能触发平台限制）`);
+        }
+        const data = JSON.parse(text);
+        if (!res.ok) throw new Error(data.error);
+
+        // 进度：每片完成后更新（合并阶段最后 10% 给合并留）
+        setUploadProgress(Math.round(((i + 1) / total) * 90));
+      }
+
       setUploadProgress(100);
-      setTimeout(() => { setUploading(false); setUploadProgress(0); }, 500);
       notify(`"${file.name}" 上传成功`);
       loadFiles();
     } catch (e: any) {
-      clearInterval(timer);
-      setUploading(false);
-      setUploadProgress(0);
       notify(e.message, true);
+    } finally {
+      setTimeout(() => { setUploading(false); setUploadProgress(0); }, 600);
     }
   };
 
@@ -465,10 +484,10 @@ export default function DrivePage() {
       <div className="titlebar">
         <div className="titlebar-logo">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <rect x="1" y="1" width="6" height="6" fill="#0078D4"/>
-            <rect x="9" y="1" width="6" height="6" fill="#0078D4"/>
-            <rect x="1" y="9" width="6" height="6" fill="#0078D4"/>
-            <rect x="9" y="9" width="6" height="6" fill="#0078D4"/>
+            <rect x="1" y="1" width="6" height="6" fill="#0078D4" />
+            <rect x="9" y="1" width="6" height="6" fill="#0078D4" />
+            <rect x="1" y="9" width="6" height="6" fill="#0078D4" />
+            <rect x="9" y="9" width="6" height="6" fill="#0078D4" />
           </svg>
           EdgeOne Drive
         </div>
