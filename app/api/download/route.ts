@@ -1,18 +1,11 @@
-// ─────────────────────────────────────────────────────────────────
-// app/api/download/route.ts   (GET: stream file download)
-// API ref: https://pages.edgeone.ai/document/blob-storage
-// ─────────────────────────────────────────────────────────────────
 import { NextRequest, NextResponse } from "next/server";
-import { getStore } from "@edgeone/pages-blob";
-
-export const runtime = "nodejs";
 import { getDriveStore } from "@/lib/blob";
 
-// ── GET /api/download?key=photos/cat.jpg ─────────────────────────
+export const runtime = "nodejs";
+
 export async function GET(request: NextRequest) {
   try {
     const store = getDriveStore();
-
     const { searchParams } = new URL(request.url);
     const key = searchParams.get("key");
 
@@ -20,32 +13,31 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Missing key parameter" }, { status: 400 });
     }
 
-    // getWithHeaders 同时返回文件内容 + 完整响应头（content-type, etag 等）
-    // 文档返回值: { body: string, headers: Record<string, string> } | null
-    const result = await store.getWithHeaders(key);
+    // ✅ 用 arrayBuffer 读取，保留完整二进制内容
+    const buffer = await store.get(key, { type: "arrayBuffer" }) as ArrayBuffer | null;
 
-    if (!result) {
+    if (!buffer) {
       return NextResponse.json({ error: "File not found" }, { status: 404 });
     }
 
-    // 优先用 getWithHeaders 拿到的 content-type；
-    // 若为空，再查上传时写入的 sidecar meta
-    let contentType = result.headers["content-type"] ?? "";
-    if (!contentType) {
-      const meta = await store.get(`__meta__/${key}`, { type: "json" }) as {
-        contentType: string;
-      } | null;
-      contentType = meta?.contentType ?? "application/octet-stream";
-    }
+    // 从 sidecar meta 读取 contentType 和 size
+    const meta = await store.get(`__meta__/${key}`, { type: "json" }) as {
+      contentType: string;
+      size: number;
+      fileName: string;
+    } | null;
 
-    const filename = key.split("/").pop() ?? "download";
+    const contentType = meta?.contentType ?? "application/octet-stream";
+    const contentLength = meta?.size ?? buffer.byteLength;
+    const filename = meta?.fileName ?? key.split("/").pop() ?? "download";
 
-    return new NextResponse(result.body, {
+    return new NextResponse(buffer, {
       headers: {
         "Content-Type": contentType,
+        // ✅ 明确告知浏览器文件大小，下载进度条才能正常显示
+        "Content-Length": String(contentLength),
         "Content-Disposition": `attachment; filename="${encodeURIComponent(filename)}"`,
         "Cache-Control": "private, max-age=3600",
-        ...(result.headers["etag"] ? { ETag: result.headers["etag"] } : {}),
       },
     });
   } catch (err: any) {
