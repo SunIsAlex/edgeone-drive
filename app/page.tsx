@@ -7,6 +7,7 @@ interface FileItem {
   size: number;
   lastModified: string;
   contentType: string;
+  etag?: string;
 }
 
 function formatSize(bytes: number): string {
@@ -18,6 +19,7 @@ function formatSize(bytes: number): string {
 }
 
 function formatDate(iso: string): string {
+  if (!iso) return "—";
   return new Date(iso).toLocaleString("zh-CN", {
     year: "numeric",
     month: "2-digit",
@@ -28,34 +30,41 @@ function formatDate(iso: string): string {
 }
 
 function getFileIcon(contentType: string, name: string): string {
+  if (contentType === "application/x-directory") return "📁";
   if (contentType.startsWith("image/")) return "🖼";
   if (contentType.startsWith("video/")) return "🎬";
   if (contentType.startsWith("audio/")) return "🎵";
   if (contentType.includes("pdf")) return "📄";
   if (contentType.includes("zip") || contentType.includes("compressed")) return "📦";
   if (contentType.includes("text/")) return "📝";
-  if (
-    name.endsWith(".js") ||
-    name.endsWith(".ts") ||
-    name.endsWith(".py") ||
-    name.endsWith(".go")
-  )
-    return "💻";
-  return "📁";
+  if (/\.(js|ts|py|go|rs|java|c|cpp|cs)$/.test(name)) return "💻";
+  return "📄";
+}
+
+function getFileTypeLabel(contentType: string): string {
+  if (contentType === "application/x-directory") return "文件夹";
+  const sub = contentType.split("/")[1];
+  if (!sub) return "文件";
+  return sub.toUpperCase().replace(/X-/, "");
 }
 
 export default function DrivePage() {
-  const [files, setFiles] = useState<FileItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
+  const [files, setFiles]                   = useState<FileItem[]>([]);
+  const [directories, setDirectories]       = useState<string[]>([]);
+  const [loading, setLoading]               = useState(true);
+  const [uploading, setUploading]           = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [dragging, setDragging] = useState(false);
-  const [deleting, setDeleting] = useState<string | null>(null);
-  const [currentPath, setCurrentPath] = useState("");
-  const [search, setSearch] = useState("");
+  const [uploadFileName, setUploadFileName] = useState("");
+  const [error, setError]                   = useState<string | null>(null);
+  const [successMsg, setSuccessMsg]         = useState<string | null>(null);
+  const [dragging, setDragging]             = useState(false);
+  const [deleting, setDeleting]             = useState<string | null>(null);
+  const [currentPath, setCurrentPath]       = useState("");
+  const [search, setSearch]                 = useState("");
+  const [showMkdir, setShowMkdir]           = useState(false);
+  const [newFolderName, setNewFolderName]   = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mkdirInputRef = useRef<HTMLInputElement>(null);
 
   const notify = (msg: string, isError = false) => {
     if (isError) {
@@ -70,10 +79,18 @@ export default function DrivePage() {
   const loadFiles = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/files?prefix=${encodeURIComponent(currentPath)}`);
+      const res = await fetch(
+        `/api/files?prefix=${encodeURIComponent(currentPath)}&directories=true`
+      );
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      setFiles(data.files || []);
+      // 过滤掉 sidecar meta 文件和 .keep 占位文件
+      const filtered = (data.files || []).filter(
+        (f: FileItem) =>
+          !f.key.startsWith("__meta__/") && !f.key.endsWith("/.keep")
+      );
+      setFiles(filtered);
+      setDirectories(data.directories || []);
     } catch (e: any) {
       notify(e.message, true);
     } finally {
@@ -85,24 +102,41 @@ export default function DrivePage() {
     loadFiles();
   }, [loadFiles]);
 
+  // 打开文件夹
+  const enterFolder = (dirKey: string) => {
+    // dirKey 形如 "photos/" 末尾带斜杠
+    setCurrentPath(dirKey);
+    setSearch("");
+  };
+
+  // 面包屑导航
+  const breadcrumbs = () => {
+    if (!currentPath) return [{ label: "我的网盘", path: "" }];
+    const parts = currentPath.replace(/\/$/, "").split("/");
+    const crumbs = [{ label: "我的网盘", path: "" }];
+    parts.forEach((p, i) => {
+      crumbs.push({ label: p, path: parts.slice(0, i + 1).join("/") + "/" });
+    });
+    return crumbs;
+  };
+
   const uploadFile = async (file: File) => {
     const MAX = 100 * 1024 * 1024;
     if (file.size > MAX) {
       notify(`文件 "${file.name}" 超过 100 MB 限制`, true);
       return;
     }
-
     setUploading(true);
     setUploadProgress(0);
+    setUploadFileName(file.name);
 
     const form = new FormData();
     form.append("file", file);
-    form.append("path", currentPath);
+    form.append("path", currentPath.replace(/\/$/, ""));
 
-    // Simulate progress since fetch doesn't expose upload progress easily
     const progressInterval = setInterval(() => {
-      setUploadProgress((p) => Math.min(p + 8, 85));
-    }, 200);
+      setUploadProgress((p) => Math.min(p + 6, 88));
+    }, 150);
 
     try {
       const res = await fetch("/api/files", { method: "POST", body: form });
@@ -110,10 +144,7 @@ export default function DrivePage() {
       clearInterval(progressInterval);
       if (!res.ok) throw new Error(data.error);
       setUploadProgress(100);
-      setTimeout(() => {
-        setUploading(false);
-        setUploadProgress(0);
-      }, 600);
+      setTimeout(() => { setUploading(false); setUploadProgress(0); }, 500);
       notify(`"${file.name}" 上传成功`);
       loadFiles();
     } catch (e: any) {
@@ -137,8 +168,11 @@ export default function DrivePage() {
     if (f) uploadFile(f);
   };
 
-  const handleDelete = async (key: string) => {
-    if (!confirm(`确认删除 "${key.split("/").pop()}"？`)) return;
+  const handleDelete = async (key: string, isDir = false) => {
+    const label = isDir
+      ? `文件夹 "${key.replace(/\/$/, "").split("/").pop()}"`
+      : `"${key.split("/").pop()}"`;
+    if (!confirm(`确认删除 ${label}？`)) return;
     setDeleting(key);
     try {
       const res = await fetch(`/api/delete?key=${encodeURIComponent(key)}`, {
@@ -146,7 +180,7 @@ export default function DrivePage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      notify("文件已删除");
+      notify("已删除");
       loadFiles();
     } catch (e: any) {
       notify(e.message, true);
@@ -159,299 +193,546 @@ export default function DrivePage() {
     window.location.href = `/api/download?key=${encodeURIComponent(key)}`;
   };
 
+  const handleMkdir = async () => {
+    const name = newFolderName.trim();
+    if (!name) return;
+    try {
+      const res = await fetch("/api/mkdir", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: currentPath.replace(/\/$/, ""), name }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      notify(`文件夹 "${name}" 已创建`);
+      setShowMkdir(false);
+      setNewFolderName("");
+      loadFiles();
+    } catch (e: any) {
+      notify(e.message, true);
+    }
+  };
+
   const filteredFiles = files.filter((f) =>
     f.key.toLowerCase().includes(search.toLowerCase())
   );
 
-  const totalSize = files.reduce((s, f) => s + f.size, 0);
+  // 目录也要过滤（去掉 __meta__ 和当前路径本身）
+  const filteredDirs = directories.filter(
+    (d) => !d.startsWith("__meta__") && d !== currentPath
+  );
+
+  const totalSize = files.reduce((s, f) => s + (f.size || 0), 0);
+  const crumbs = breadcrumbs();
 
   return (
-    <div className="drive-root">
-      {/* Notification bar */}
+    <div className="root">
+      {/* Toast */}
       {(error || successMsg) && (
-        <div className={`notif ${error ? "notif-error" : "notif-ok"}`}>
-          {error ? "⚠ " : "✓ "}
+        <div className={`toast ${error ? "toast-err" : "toast-ok"}`}>
+          <span>{error ? "⚠" : "✓"}</span>
           {error || successMsg}
         </div>
       )}
 
-      <header className="header">
-        <div className="logo">
-          <span className="logo-mark">▲</span>
-          <span className="logo-text">EdgeOne Drive</span>
+      {/* Title bar */}
+      <div className="titlebar">
+        <div className="titlebar-logo">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <rect x="1" y="1" width="6" height="6" fill="#0078D4"/>
+            <rect x="9" y="1" width="6" height="6" fill="#0078D4"/>
+            <rect x="1" y="9" width="6" height="6" fill="#0078D4"/>
+            <rect x="9" y="9" width="6" height="6" fill="#0078D4"/>
+          </svg>
+          EdgeOne Drive
         </div>
-        <div className="header-stats">
-          {files.length} 个文件 · {formatSize(totalSize)}
+        <div className="titlebar-stat">
+          {files.length} 个项目 &nbsp;|&nbsp; {formatSize(totalSize)}
         </div>
-      </header>
+      </div>
 
-      <main className="main">
-        {/* Toolbar */}
-        <div className="toolbar">
-          <div className="search-wrap">
-            <span className="search-icon">⌕</span>
-            <input
-              className="search-input"
-              placeholder="搜索文件…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </div>
-          <button
-            className="upload-btn"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-          >
-            {uploading ? "上传中…" : "+ 上传文件"}
-          </button>
+      {/* Ribbon toolbar */}
+      <div className="ribbon">
+        <button className="ribbon-btn primary"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+        >
+          <span className="ribbon-icon">⬆</span>
+          <span>{uploading ? "上传中…" : "上传"}</span>
+        </button>
+        <button className="ribbon-btn"
+          onClick={() => { setShowMkdir(true); setTimeout(() => mkdirInputRef.current?.focus(), 50); }}
+        >
+          <span className="ribbon-icon">📁</span>
+          <span>新建文件夹</span>
+        </button>
+        <div className="ribbon-sep" />
+        <button className="ribbon-btn" onClick={loadFiles}>
+          <span className="ribbon-icon">↻</span>
+          <span>刷新</span>
+        </button>
+        <div className="ribbon-spacer" />
+        <div className="search-wrap">
+          <span className="search-icon">🔍</span>
           <input
-            ref={fileInputRef}
-            type="file"
-            style={{ display: "none" }}
-            onChange={handleFileChange}
+            className="search-input"
+            placeholder="搜索当前文件夹"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
           />
         </div>
+        <input ref={fileInputRef} type="file" style={{ display: "none" }} onChange={handleFileChange} />
+      </div>
 
-        {/* Upload progress */}
-        {uploading && (
-          <div className="progress-bar-wrap">
-            <div className="progress-bar" style={{ width: `${uploadProgress}%` }} />
-            <span className="progress-label">{uploadProgress}%</span>
+      {/* Address bar / breadcrumb */}
+      <div className="addrbar">
+        <span className="addrbar-label">位置:</span>
+        <div className="breadcrumbs">
+          {crumbs.map((c, i) => (
+            <span key={c.path} className="crumb-group">
+              {i > 0 && <span className="crumb-sep">›</span>}
+              <button
+                className={`crumb ${i === crumbs.length - 1 ? "crumb-active" : ""}`}
+                onClick={() => { setCurrentPath(c.path); setSearch(""); }}
+              >
+                {c.label}
+              </button>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Upload progress bar */}
+      {uploading && (
+        <div className="upload-banner">
+          <span className="upload-name">正在上传: {uploadFileName}</span>
+          <div className="upload-track">
+            <div className="upload-fill" style={{ width: `${uploadProgress}%` }} />
           </div>
+          <span className="upload-pct">{uploadProgress}%</span>
+        </div>
+      )}
+
+      {/* Main content */}
+      <div
+        className={`content ${dragging ? "drag-over" : ""}`}
+        onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={handleDrop}
+      >
+        {loading ? (
+          <div className="state-msg">
+            <div className="spinner" />
+            加载中…
+          </div>
+        ) : (filteredDirs.length === 0 && filteredFiles.length === 0) ? (
+          <div className="state-msg">
+            {search
+              ? `未找到匹配 "${search}" 的项目`
+              : dragging
+              ? "松开鼠标以上传文件"
+              : "此文件夹为空，拖拽文件到此处或点击"上传""}
+          </div>
+        ) : (
+          <>
+            {/* Column headers */}
+            <div className="col-header">
+              <span className="col-name">名称</span>
+              <span className="col-date">修改日期</span>
+              <span className="col-type">类型</span>
+              <span className="col-size">大小</span>
+              <span className="col-actions" />
+            </div>
+
+            {/* Folders */}
+            {filteredDirs.map((dir) => {
+              const label = dir.replace(/\/$/, "").split("/").pop() || dir;
+              return (
+                <div key={dir} className="row" onDoubleClick={() => enterFolder(dir)}>
+                  <span className="col-name">
+                    <span className="item-icon">📁</span>
+                    <span className="item-label" title={dir}>{label}</span>
+                  </span>
+                  <span className="col-date">—</span>
+                  <span className="col-type">文件夹</span>
+                  <span className="col-size">—</span>
+                  <span className="col-actions">
+                    <button className="act open" onClick={() => enterFolder(dir)} title="打开">▶</button>
+                    <button
+                      className="act del"
+                      onClick={() => handleDelete(dir + ".keep", true)}
+                      disabled={deleting === dir + ".keep"}
+                      title="删除"
+                    >✕</button>
+                  </span>
+                </div>
+              );
+            })}
+
+            {/* Files */}
+            {filteredFiles.map((file) => {
+              const name = file.key.split("/").pop() || file.key;
+              return (
+                <div key={file.key} className="row">
+                  <span className="col-name">
+                    <span className="item-icon">{getFileIcon(file.contentType, name)}</span>
+                    <span className="item-label" title={file.key}>{name}</span>
+                  </span>
+                  <span className="col-date">{formatDate(file.lastModified)}</span>
+                  <span className="col-type">{getFileTypeLabel(file.contentType)}</span>
+                  <span className="col-size">{file.size ? formatSize(file.size) : "—"}</span>
+                  <span className="col-actions">
+                    <button className="act dl" onClick={() => handleDownload(file.key)} title="下载">↓</button>
+                    <button
+                      className="act del"
+                      onClick={() => handleDelete(file.key)}
+                      disabled={deleting === file.key}
+                      title="删除"
+                    >{deleting === file.key ? "…" : "✕"}</button>
+                  </span>
+                </div>
+              );
+            })}
+          </>
         )}
+      </div>
 
-        {/* Drop zone */}
-        <div
-          className={`drop-zone ${dragging ? "drag-over" : ""}`}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragging(true);
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={handleDrop}
-        >
-          {dragging ? (
-            <span className="drop-hint active">松开鼠标上传</span>
-          ) : (
-            <span className="drop-hint">或将文件拖拽至此处（最大 100 MB）</span>
-          )}
-        </div>
+      {/* Status bar */}
+      <div className="statusbar">
+        {search
+          ? `搜索结果: ${filteredFiles.length} 个文件`
+          : `${filteredDirs.length} 个文件夹，${filteredFiles.length} 个文件`}
+      </div>
 
-        {/* File list */}
-        <div className="file-list">
-          {loading ? (
-            <div className="empty">
-              <span className="spinner">◌</span> 加载中…
+      {/* New folder modal */}
+      {showMkdir && (
+        <div className="overlay" onClick={() => setShowMkdir(false)}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-title">
+              <span>📁</span> 新建文件夹
             </div>
-          ) : filteredFiles.length === 0 ? (
-            <div className="empty">
-              {search ? "没有匹配的文件" : "暂无文件，上传第一个文件吧 🚀"}
+            <div className="dialog-body">
+              <label className="dialog-label">请输入文件夹名称</label>
+              <input
+                ref={mkdirInputRef}
+                className="dialog-input"
+                placeholder="新建文件夹"
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleMkdir();
+                  if (e.key === "Escape") setShowMkdir(false);
+                }}
+              />
             </div>
-          ) : (
-            <>
-              <div className="file-list-header">
-                <span>文件名</span>
-                <span>类型</span>
-                <span>大小</span>
-                <span>修改时间</span>
-                <span>操作</span>
-              </div>
-              {filteredFiles.map((file) => {
-                const name = file.key.split("/").pop() || file.key;
-                return (
-                  <div key={file.key} className="file-row">
-                    <span className="file-name">
-                      <span className="file-icon">
-                        {getFileIcon(file.contentType, name)}
-                      </span>
-                      <span className="file-name-text" title={file.key}>
-                        {name}
-                      </span>
-                    </span>
-                    <span className="file-type">
-                      {file.contentType.split("/")[1]?.toUpperCase() || "FILE"}
-                    </span>
-                    <span className="file-size">{formatSize(file.size)}</span>
-                    <span className="file-date">{formatDate(file.lastModified)}</span>
-                    <span className="file-actions">
-                      <button
-                        className="act-btn act-download"
-                        onClick={() => handleDownload(file.key)}
-                        title="下载"
-                      >
-                        ↓
-                      </button>
-                      <button
-                        className="act-btn act-delete"
-                        onClick={() => handleDelete(file.key)}
-                        disabled={deleting === file.key}
-                        title="删除"
-                      >
-                        {deleting === file.key ? "…" : "✕"}
-                      </button>
-                    </span>
-                  </div>
-                );
-              })}
-            </>
-          )}
+            <div className="dialog-footer">
+              <button className="dialog-btn" onClick={() => setShowMkdir(false)}>取消</button>
+              <button
+                className="dialog-btn primary"
+                onClick={handleMkdir}
+                disabled={!newFolderName.trim()}
+              >确定</button>
+            </div>
+          </div>
         </div>
-      </main>
+      )}
 
       <style>{`
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; }
 
-        .drive-root {
+        /* ── 全局变量 (Windows 11 Explorer 风格，浅色) ── */
+        :root {
+          --bg:          #f3f3f3;
+          --bg-content:  #ffffff;
+          --bg-titlebar: #f3f3f3;
+          --bg-ribbon:   #ffffff;
+          --bg-addr:     #f9f9f9;
+          --bg-header:   #f3f3f3;
+          --bg-row-hover:#cce8ff;
+          --bg-row-sel:  #cce8ff;
+          --border:      #e0e0e0;
+          --border-addr: #c8c8c8;
+          --text:        #1a1a1a;
+          --text-sub:    #666666;
+          --text-head:   #444444;
+          --accent:      #0078D4;
+          --accent-dark: #005a9e;
+          --accent-light:#deecf9;
+          --danger:      #c42b1c;
+          --success-bg:  #dff6dd;
+          --success-text:#107c10;
+          --err-bg:      #fde7e9;
+          --err-text:    #c42b1c;
+          --shadow:      0 2px 8px rgba(0,0,0,0.12);
+          --radius:      4px;
+          --font:        'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+          --font-mono:   'Consolas', 'Courier New', monospace;
+        }
+
+        .root {
           min-height: 100vh;
-          background: #0a0a0f;
-          color: #e8e8f0;
-          font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', monospace;
+          display: flex; flex-direction: column;
+          background: var(--bg);
+          font-family: var(--font);
           font-size: 13px;
+          color: var(--text);
         }
 
-        .notif {
-          position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-          padding: 10px 24px;
-          font-size: 13px;
-          font-weight: 600;
-          text-align: center;
-          animation: slideDown 0.2s ease;
+        /* ── Toast ── */
+        .toast {
+          position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+          z-index: 999; display: flex; align-items: center; gap: 8px;
+          padding: 10px 20px; border-radius: var(--radius);
+          font-size: 13px; font-weight: 500;
+          box-shadow: var(--shadow);
+          animation: toastIn 0.2s ease;
         }
-        .notif-ok  { background: #0d3320; color: #4ade80; border-bottom: 1px solid #166534; }
-        .notif-error { background: #3b0a0a; color: #f87171; border-bottom: 1px solid #991b1b; }
-        @keyframes slideDown { from { transform: translateY(-100%); } to { transform: translateY(0); } }
+        .toast-ok  { background: var(--success-bg); color: var(--success-text); border: 1px solid #a7d7a8; }
+        .toast-err { background: var(--err-bg);     color: var(--err-text);     border: 1px solid #f4abab; }
+        @keyframes toastIn { from { opacity:0; transform: translateX(-50%) translateY(-8px); } to { opacity:1; transform: translateX(-50%) translateY(0); } }
 
-        .header {
+        /* ── Title bar ── */
+        .titlebar {
           display: flex; align-items: center; justify-content: space-between;
-          padding: 18px 32px;
-          border-bottom: 1px solid #1e1e2e;
-          background: #0d0d18;
+          padding: 6px 16px;
+          background: var(--bg-titlebar);
+          border-bottom: 1px solid var(--border);
+          user-select: none;
         }
-        .logo { display: flex; align-items: center; gap: 10px; }
-        .logo-mark { color: #6366f1; font-size: 20px; }
-        .logo-text { font-size: 16px; font-weight: 700; letter-spacing: 0.05em; color: #c7c7e8; }
-        .header-stats { color: #4a4a6a; font-size: 11px; }
+        .titlebar-logo {
+          display: flex; align-items: center; gap: 8px;
+          font-size: 12px; font-weight: 600; color: var(--text);
+        }
+        .titlebar-stat { font-size: 11px; color: var(--text-sub); }
 
-        .main { max-width: 1100px; margin: 0 auto; padding: 28px 24px; }
+        /* ── Ribbon ── */
+        .ribbon {
+          display: flex; align-items: center; gap: 4px;
+          padding: 6px 12px;
+          background: var(--bg-ribbon);
+          border-bottom: 1px solid var(--border);
+        }
+        .ribbon-btn {
+          display: flex; flex-direction: column; align-items: center; gap: 2px;
+          padding: 6px 12px; min-width: 52px;
+          background: transparent; border: 1px solid transparent;
+          border-radius: var(--radius); cursor: pointer;
+          font-family: var(--font); font-size: 11px; color: var(--text);
+          transition: background 0.1s, border-color 0.1s;
+        }
+        .ribbon-btn:hover { background: var(--accent-light); border-color: #90c8f0; }
+        .ribbon-btn:active { background: #b0d8f5; }
+        .ribbon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+        .ribbon-btn.primary .ribbon-icon { color: var(--accent); }
+        .ribbon-icon { font-size: 18px; line-height: 1; }
+        .ribbon-sep { width: 1px; height: 36px; background: var(--border); margin: 0 4px; }
+        .ribbon-spacer { flex: 1; }
 
-        .toolbar {
-          display: flex; gap: 12px; align-items: center; margin-bottom: 16px;
-        }
-        .search-wrap {
-          position: relative; flex: 1;
-        }
+        /* ── Search ── */
+        .search-wrap { position: relative; }
         .search-icon {
-          position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
-          color: #4a4a6a; font-size: 16px; pointer-events: none;
+          position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
+          font-size: 12px; pointer-events: none;
         }
         .search-input {
-          width: 100%; padding: 9px 12px 9px 34px;
-          background: #12121e; border: 1px solid #1e1e30;
-          border-radius: 6px; color: #c7c7e8; font-family: inherit; font-size: 13px;
-          outline: none; transition: border-color 0.15s;
+          padding: 5px 10px 5px 28px; width: 220px;
+          background: var(--bg); border: 1px solid var(--border-addr);
+          border-radius: 16px; font-family: var(--font); font-size: 12px;
+          color: var(--text); outline: none; transition: border-color 0.15s, box-shadow 0.15s;
         }
-        .search-input:focus { border-color: #4a4aff; }
-        .search-input::placeholder { color: #3a3a5a; }
+        .search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-light); }
+        .search-input::placeholder { color: #aaa; }
 
-        .upload-btn {
-          padding: 9px 18px;
-          background: #4a4aff; color: #fff;
-          border: none; border-radius: 6px; cursor: pointer;
-          font-family: inherit; font-size: 13px; font-weight: 600;
-          transition: background 0.15s, transform 0.1s;
-          white-space: nowrap;
+        /* ── Address bar ── */
+        .addrbar {
+          display: flex; align-items: center; gap: 8px;
+          padding: 5px 12px;
+          background: var(--bg-addr);
+          border-bottom: 1px solid var(--border);
         }
-        .upload-btn:hover:not(:disabled) { background: #5a5aff; }
-        .upload-btn:active:not(:disabled) { transform: scale(0.97); }
-        .upload-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-        .progress-bar-wrap {
-          position: relative; height: 4px; background: #1e1e30;
-          border-radius: 2px; margin-bottom: 12px; overflow: hidden;
-        }
-        .progress-bar {
-          height: 100%; background: #4a4aff;
-          border-radius: 2px; transition: width 0.2s ease;
-        }
-        .progress-label {
-          position: absolute; right: 0; top: 6px;
-          font-size: 10px; color: #4a4aff;
-        }
-
-        .drop-zone {
-          border: 1px dashed #1e1e35;
-          border-radius: 8px; padding: 14px 20px;
-          text-align: center; margin-bottom: 20px;
-          transition: border-color 0.15s, background 0.15s;
-          cursor: default;
-        }
-        .drop-zone.drag-over { border-color: #4a4aff; background: #0f0f2a; }
-        .drop-hint { color: #3a3a5a; font-size: 12px; }
-        .drop-hint.active { color: #6366f1; }
-
-        .file-list { border: 1px solid #1a1a2a; border-radius: 8px; overflow: hidden; }
-
-        .file-list-header {
-          display: grid;
-          grid-template-columns: 2fr 1fr 1fr 1.5fr 80px;
-          padding: 10px 16px;
-          background: #0d0d18;
-          color: #3a3a5a;
-          font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
-          border-bottom: 1px solid #1a1a2a;
-        }
-
-        .file-row {
-          display: grid;
-          grid-template-columns: 2fr 1fr 1fr 1.5fr 80px;
-          padding: 12px 16px;
-          border-bottom: 1px solid #14141e;
-          align-items: center;
+        .addrbar-label { font-size: 11px; color: var(--text-sub); white-space: nowrap; }
+        .breadcrumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 0; }
+        .crumb-group { display: flex; align-items: center; }
+        .crumb-sep { color: var(--text-sub); margin: 0 4px; font-size: 12px; }
+        .crumb {
+          padding: 2px 6px; background: transparent; border: none;
+          border-radius: var(--radius); cursor: pointer;
+          font-family: var(--font); font-size: 12px; color: var(--accent);
           transition: background 0.1s;
         }
-        .file-row:last-child { border-bottom: none; }
-        .file-row:hover { background: #0e0e1c; }
+        .crumb:hover { background: var(--accent-light); text-decoration: underline; }
+        .crumb.crumb-active { color: var(--text); cursor: default; font-weight: 500; }
+        .crumb.crumb-active:hover { background: transparent; text-decoration: none; }
 
-        .file-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
-        .file-icon { font-size: 16px; flex-shrink: 0; }
-        .file-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c7c7e8; }
-        .file-type { color: #4a4a6a; font-size: 10px; letter-spacing: 0.05em; }
-        .file-size { color: #7a7a9a; }
-        .file-date { color: #4a4a6a; font-size: 11px; }
+        /* ── Upload banner ── */
+        .upload-banner {
+          display: flex; align-items: center; gap: 10px;
+          padding: 6px 16px;
+          background: var(--accent-light);
+          border-bottom: 1px solid #90c8f0;
+          font-size: 12px;
+        }
+        .upload-name { color: var(--text); min-width: 120px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .upload-track { flex: 1; height: 6px; background: #c8e0f5; border-radius: 3px; overflow: hidden; }
+        .upload-fill { height: 100%; background: var(--accent); transition: width 0.2s ease; border-radius: 3px; }
+        .upload-pct { color: var(--accent); font-weight: 600; min-width: 36px; text-align: right; }
 
-        .file-actions { display: flex; gap: 6px; }
-        .act-btn {
-          padding: 4px 9px; border-radius: 4px; border: 1px solid transparent;
-          cursor: pointer; font-size: 12px; font-family: inherit; font-weight: 600;
-          transition: all 0.1s;
+        /* ── Content area ── */
+        .content {
+          flex: 1;
+          background: var(--bg-content);
+          overflow-y: auto;
+          transition: background 0.15s;
         }
-        .act-download {
-          background: #0d1a2a; color: #60a5fa; border-color: #1a2a3a;
-        }
-        .act-download:hover { background: #1a2a3a; }
-        .act-delete {
-          background: #1a0d0d; color: #f87171; border-color: #2a1a1a;
-        }
-        .act-delete:hover:not(:disabled) { background: #2a1a1a; }
-        .act-delete:disabled { opacity: 0.4; cursor: not-allowed; }
+        .content.drag-over { background: var(--accent-light); }
 
-        .empty {
-          padding: 48px; text-align: center; color: #3a3a5a; font-size: 13px;
+        /* ── Column header ── */
+        .col-header {
+          display: grid;
+          grid-template-columns: minmax(200px, 2.5fr) 160px 120px 90px 88px;
+          padding: 6px 16px;
+          background: var(--bg-header);
+          border-bottom: 1px solid var(--border);
+          color: var(--text-head);
+          font-size: 12px; font-weight: 600;
+          position: sticky; top: 0; z-index: 1;
+          user-select: none;
         }
-        .spinner { display: inline-block; animation: spin 1.2s linear infinite; }
+
+        /* ── File/folder row ── */
+        .row {
+          display: grid;
+          grid-template-columns: minmax(200px, 2.5fr) 160px 120px 90px 88px;
+          padding: 4px 16px;
+          align-items: center;
+          border-bottom: 1px solid transparent;
+          transition: background 0.08s;
+          cursor: default;
+        }
+        .row:hover { background: var(--bg-row-hover); }
+        .row:hover .col-actions { opacity: 1; }
+
+        .col-name  { display: flex; align-items: center; gap: 6px; min-width: 0; }
+        .col-date  { color: var(--text-sub); font-size: 12px; }
+        .col-type  { color: var(--text-sub); font-size: 12px; }
+        .col-size  { color: var(--text-sub); font-size: 12px; text-align: right; padding-right: 8px; }
+        .col-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.1s; }
+
+        .item-icon { font-size: 16px; flex-shrink: 0; }
+        .item-label {
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          font-size: 13px; color: var(--text);
+        }
+
+        /* ── Action buttons ── */
+        .act {
+          padding: 3px 8px; border-radius: var(--radius);
+          border: 1px solid transparent; cursor: pointer;
+          font-size: 12px; font-family: var(--font); font-weight: 600;
+          transition: background 0.1s, border-color 0.1s;
+          line-height: 1.4;
+        }
+        .act.dl   { background: var(--accent-light); color: var(--accent); border-color: #90c8f0; }
+        .act.dl:hover { background: #b0d8f5; }
+        .act.open { background: var(--accent-light); color: var(--accent); border-color: #90c8f0; font-size: 10px; }
+        .act.open:hover { background: #b0d8f5; }
+        .act.del  { background: #fde7e9; color: var(--danger); border-color: #f4abab; }
+        .act.del:hover:not(:disabled) { background: #f9c5c3; }
+        .act.del:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        /* ── State messages ── */
+        .state-msg {
+          display: flex; flex-direction: column; align-items: center;
+          justify-content: center; gap: 12px;
+          padding: 80px 24px; color: var(--text-sub); font-size: 13px;
+          text-align: center;
+        }
+        .spinner {
+          width: 24px; height: 24px;
+          border: 3px solid var(--border);
+          border-top-color: var(--accent);
+          border-radius: 50%;
+          animation: spin 0.8s linear infinite;
+        }
         @keyframes spin { to { transform: rotate(360deg); } }
 
+        /* ── Status bar ── */
+        .statusbar {
+          padding: 4px 16px;
+          background: var(--bg-titlebar);
+          border-top: 1px solid var(--border);
+          font-size: 11px; color: var(--text-sub);
+          user-select: none;
+        }
+
+        /* ── New folder dialog ── */
+        .overlay {
+          position: fixed; inset: 0; z-index: 500;
+          background: rgba(0,0,0,0.35);
+          display: flex; align-items: center; justify-content: center;
+          animation: fadeIn 0.15s ease;
+        }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        .dialog {
+          background: #ffffff;
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          width: 380px;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+          animation: dialogIn 0.15s ease;
+          overflow: hidden;
+        }
+        @keyframes dialogIn { from { transform: scale(0.96) translateY(8px); opacity:0; } to { transform: scale(1) translateY(0); opacity:1; } }
+
+        .dialog-title {
+          display: flex; align-items: center; gap: 8px;
+          padding: 14px 16px;
+          background: var(--bg-titlebar);
+          border-bottom: 1px solid var(--border);
+          font-size: 13px; font-weight: 600; color: var(--text);
+        }
+        .dialog-body { padding: 16px; }
+        .dialog-label { display: block; font-size: 12px; color: var(--text-sub); margin-bottom: 8px; }
+        .dialog-input {
+          width: 100%; padding: 7px 10px;
+          border: 1px solid var(--border-addr); border-radius: var(--radius);
+          font-family: var(--font); font-size: 13px; color: var(--text);
+          outline: none; transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .dialog-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-light); }
+
+        .dialog-footer {
+          display: flex; justify-content: flex-end; gap: 8px;
+          padding: 10px 16px;
+          background: var(--bg-titlebar);
+          border-top: 1px solid var(--border);
+        }
+        .dialog-btn {
+          padding: 6px 20px; border-radius: var(--radius);
+          border: 1px solid var(--border-addr);
+          background: #ffffff; color: var(--text);
+          font-family: var(--font); font-size: 13px; cursor: pointer;
+          transition: background 0.1s;
+        }
+        .dialog-btn:hover { background: var(--bg); }
+        .dialog-btn.primary {
+          background: var(--accent); color: #fff; border-color: var(--accent);
+        }
+        .dialog-btn.primary:hover:not(:disabled) { background: var(--accent-dark); border-color: var(--accent-dark); }
+        .dialog-btn.primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+        /* ── Responsive ── */
         @media (max-width: 680px) {
-          .file-list-header,
-          .file-row {
-            grid-template-columns: 1fr auto 64px;
+          .col-header, .row {
+            grid-template-columns: 1fr 80px 72px;
           }
-          .file-list-header span:nth-child(2),
-          .file-list-header span:nth-child(4),
-          .file-row .file-type,
-          .file-row .file-date { display: none; }
-          .header { padding: 14px 16px; }
-          .main { padding: 16px; }
+          .col-date, .col-type { display: none; }
+          .col-size { padding-right: 4px; }
+          .search-input { width: 140px; }
+          .ribbon-btn span:last-child { display: none; }
+          .ribbon-btn { min-width: 36px; }
         }
       `}</style>
     </div>
